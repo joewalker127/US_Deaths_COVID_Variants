@@ -1,1 +1,3 @@
-# Model-based estimates of deaths caused by SARS-CoV-2 Variants in the United States
+# Model-based Estimates of Deaths Caused by SARS-CoV-2 Variants in the United States
+
+Contents:
