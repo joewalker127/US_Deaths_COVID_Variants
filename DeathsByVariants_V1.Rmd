@@ -1,0 +1,1750 @@
+---
+title: "Estimating US Deaths by Variant (V1)"
+author: "Jo Walker"
+date: "5/11/2022"
+output: html_document
+---
+
+# Processing State-Level Death Counts
+
+```{r, echo=F,message=FALSE}
+knitr::opts_chunk$set(echo = F, message = F)
+
+library(tidyverse)
+options(dplyr.summarise.inform = FALSE)
+library(knitr)
+library(DT)
+library(readxl)
+library(zoo)
+library(ggpubr)
+library(scales)
+library(png)
+library(patchwork)
+library(lubridate)
+
+StateDeathData = read.csv("~/Downloads/United_States_COVID-19_Cases_and_Deaths_by_State_over_Time (1).csv") 
+
+StateDeathData = StateDeathData %>% 
+  mutate(submission_date = as.Date(submission_date, format="%m/%d/%Y")) %>%
+  arrange(state, submission_date) %>% 
+  rename(Date = submission_date,
+         State_Code = state) %>% 
+  select(Date, State_Code) %>%
+  mutate(State = state.name[match(State_Code, state.abb)],
+         State = ifelse(State_Code=="NYC", "New York City", State),
+         State = ifelse(State_Code=="PR", "Puerto Rico", State),
+         State = ifelse(State_Code=="DC", "District of Columbia", State)
+         ) %>% 
+  filter(!is.na(State)) %>%
+  mutate(OccurredDeaths = 0,
+         NewCases = 0)
+
+NCHS_Deaths <- read.csv("~/Downloads/Provisional_COVID-19_Death_Counts_by_Week_Ending_Date_and_State (3).csv") %>% 
+  mutate(Start.Date = as.Date(Start.Date, format = "%m/%d/%Y"),
+         End.Date = as.Date(End.Date, format = "%m/%d/%Y"),
+         Data.as.of = as.Date(Data.as.of, format = "%m/%d/%Y"),
+         Week.Ending.Date = as.Date(Week.Ending.Date, format = "%m/%d/%Y"),
+         Pneumonia.Influenza.or.COVID.19.Deaths = 
+           Pneumonia..Influenza..or.COVID.19.Deaths,
+         Expected.Deaths = 100*Total.Deaths/Percent.of.Expected.Deaths,
+         Excess.Deaths = Total.Deaths - Expected.Deaths,
+         Nonpneumo.Influenza.or.COVID.19.Deaths = 
+           Pneumonia.Influenza.or.COVID.19.Deaths - 
+           Pneumonia.Deaths + 
+           Pneumonia.and.COVID.19.Deaths,
+         MonthYearStart = substr(as.character(Start.Date),1,7),
+         MonthYearEnd = substr(as.character(End.Date), 1,7))
+  
+NCHS_State_Deaths = filter(NCHS_Deaths, State != "United States")
+NCHS_StateOnly_Deaths = filter(NCHS_Deaths, ! State %in% c("United States", "Puerto Rico"))
+NCHS_National_Deaths = filter(NCHS_Deaths, State == "United States")
+NCHS_PuertoRico_Deaths = filter(NCHS_Deaths, State == "Puerto Rico")
+
+# if(max(NCHS_Deaths$End.Date)> max(StateDeathData$Date))
+#   {
+#   StateDeathData = 
+#     rbind(StateDeathData,
+#           expand.grid(Date =
+#                     seq(max(StateDeathData$Date)+1,
+#                         max(NCHS_Deaths$End.Date),1),
+#                     State_Code = unique(StateDeathData$State_Code)) %>%
+#             mutate(State = state.name[match(State_Code, state.abb)],
+#                    OccurredDeaths = 0, NewCases = 0,
+#                    State = ifelse(State_Code=="NYC", "New York City", State),
+#          State = ifelse(State_Code=="PR", "Puerto Rico", State),
+#          State = ifelse(State_Code=="DC", "District of Columbia", State))
+#     ) %>% 
+#     arrange(State, Date) 
+# }
+# 
+# if(min(NCHS_Deaths$Start.Date) < min(StateDeathData$Date))
+#   {
+#   StateDeathData = 
+#     rbind(
+#       expand.grid(Date =
+#                     seq(min(NCHS_Deaths$Start.Date),
+#                         min(StateDeathData$Date)-1,1),
+#                     State_Code = unique(StateDeathData$State_Code)) %>%
+#             mutate(State = state.name[match(State_Code, state.abb)],
+#                    OccurredDeaths = 0, NewCases = 0,
+#                    State = 
+#                      ifelse(State_Code=="NYC", "New York City", State),
+#          State = ifelse(State_Code=="PR", "Puerto Rico", State),
+#          State = ifelse(State_Code=="DC", "District of Columbia", State)),
+#       StateDeathData
+#           ) %>% 
+#     arrange(State, Date) 
+#   }
+
+# sum of total deaths across all jurisdictions 
+TotalDeaths = NCHS_State_Deaths %>%  filter(Group == "By Total") %>%  select(COVID.19.Deaths) %>% sum() 
+
+# sum of weekly deaths across all jurisdictions (not including deaths in suppressed weeks)
+TotalWeeklyDeaths = NCHS_State_Deaths %>%  filter(Group == "By Week") %>%  select(COVID.19.Deaths) %>% sum(na.rm=T) 
+
+# sum of monthly deaths across all jurisdictions (not including deaths in suppressed weeks)
+TotalMonthlyDeaths = NCHS_State_Deaths %>%  filter(Group == "By Month") %>%  select(COVID.19.Deaths) %>% sum(na.rm=T) 
+
+deathCoverage =
+NCHS_State_Deaths %>% 
+  group_by(Group, State) %>%
+  summarize(COVID.19.Deaths = sum(COVID.19.Deaths,na.rm=T)) %>%
+  ungroup() %>%
+  pivot_wider(id_cols = State, names_from = Group, values_from = COVID.19.Deaths) %>% 
+  mutate(year_coverage = 100*`By Year`/`By Total`,
+         month_coverage = 100*`By Month`/`By Total`,
+         week_coverage = 100*`By Week`/`By Total`) %>% 
+  select(State, year_coverage, month_coverage, week_coverage) %>% 
+  arrange(month_coverage)
+
+```
+
+```{r}
+# set suppressed weekly death counts to 0
+NCHS_Deaths =
+  NCHS_Deaths %>% 
+  mutate(COVID.19.Deaths = ifelse(is.na(COVID.19.Deaths), 0, COVID.19.Deaths))
+
+NCHS_State_Deaths = filter(NCHS_Deaths, State != "United States")
+NCHS_StateOnly_Deaths = filter(NCHS_Deaths, ! State %in% c("United States", "Puerto Rico"))
+NCHS_National_Deaths = filter(NCHS_Deaths, State == "United States")
+NCHS_PuertoRico_Deaths = filter(NCHS_Deaths, State == "Puerto Rico")
+
+# get deaths in suppressed weeks by state
+
+totalStateDeaths = 
+NCHS_Deaths %>% 
+  mutate(Group = gsub("By ", "", Group)) %>%
+  group_by(Group, State) %>%
+  summarize(COVID.19.Deaths = sum(COVID.19.Deaths,na.rm=T)) %>%
+  ungroup() %>%
+  pivot_wider(id_cols = State, 
+              names_from = Group, 
+              names_prefix = "Deaths",
+              values_from = COVID.19.Deaths) %>% 
+  mutate(SuppressedDeaths = DeathsTotal-DeathsWeek)
+
+```
+
+# Backdistributing Deaths
+
+```{r, cache = T}
+
+
+set.seed(1)
+Iterations = 250
+
+
+
+
+NCHS_Weekly_Deaths = 
+  NCHS_State_Deaths %>% 
+  filter(Group == "By Week") %>%
+  select(-Footnote, Start.Date, End.Date, State, COVID.19.Deaths)
+
+StateDeathData$OccurredDeaths = NA
+
+OccurredDeaths = list()
+FatalCasesOnset = list()
+FatalCasesTested = list()
+
+Locations = unique(NCHS_State_Deaths$State)
+
+Dates = 
+  seq(min(NCHS_Deaths$Start.Date), max(NCHS_Deaths$End.Date),1)
+
+rm(NCHS_Deaths)
+
+NCHS_State_Deaths$WeekEndNumeric =
+  NCHS_State_Deaths$End.Date-min(Dates)+1
+
+NCHS_Weekly_Deaths$WeekEndNumeric =
+  NCHS_Weekly_Deaths$End.Date-min(Dates)+1
+
+LintonOnsetToDeathLag = 
+  data.frame(Lag = 0:50, 
+             Density = diff(c(plnorm(0:50,meanlog = 2.863,sdlog=0.534 ), 1))) 
+
+
+AssumedOnsetToSampleLag = data.frame(Lag = 0:3, Density = rep(0.25,4))
+
+
+for(i in Locations)
+  {
+  
+  dat = filter(NCHS_Weekly_Deaths,
+               State == i)
+  
+  DeathEndDates = 
+    rep(dat$WeekEndNumeric, dat$COVID.19.Deaths)
+  
+  WeeklyLags = 
+    matrix(floor(runif(length(DeathEndDates)*Iterations,
+                            0, 7)), 
+                      nrow = length(DeathEndDates),
+                      ncol = Iterations)
+  
+    OnsetDeathLags =
+      matrix(
+        sample(x = LintonOnsetToDeathLag$Lag,
+               size = length(DeathEndDates)*Iterations,
+               replace = T,
+               prob = LintonOnsetToDeathLag$Density), 
+                      nrow = length(DeathEndDates),
+                      ncol = Iterations)
+    
+    OnsetTestingLags = 
+      matrix(
+        sample(x = AssumedOnsetToSampleLag$Lag,
+               size = length(DeathEndDates)*Iterations,
+               replace = T,
+               prob = AssumedOnsetToSampleLag$Density), 
+                      nrow = length(DeathEndDates),
+                      ncol = Iterations)
+  
+  OccurredDeaths[[i]] = 
+         (DeathEndDates - WeeklyLags) %>% 
+    apply(MARGIN=2,FUN=tabulate,nbins =
+            max(NCHS_State_Deaths$WeekEndNumeric))
+  
+  FatalCasesOnset[[i]] = 
+    ifelse((DeathEndDates - WeeklyLags - OnsetDeathLags) < 1, 1,
+      (DeathEndDates - WeeklyLags - OnsetDeathLags)
+      ) %>% 
+        apply(MARGIN=2,FUN=tabulate,nbins =
+            max(NCHS_State_Deaths$WeekEndNumeric))
+  
+  FatalCasesTested[[i]] = 
+  ifelse((DeathEndDates - WeeklyLags - OnsetDeathLags + OnsetTestingLags) > (DeathEndDates - WeeklyLags),
+         (DeathEndDates - WeeklyLags),
+         ifelse((DeathEndDates - WeeklyLags - OnsetDeathLags + OnsetTestingLags) < 1,1,
+         (DeathEndDates - WeeklyLags - OnsetDeathLags + OnsetTestingLags))
+         ) %>% 
+    apply(MARGIN=2,FUN=tabulate,nbins =
+            max(NCHS_State_Deaths$WeekEndNumeric))
+    
+  if(sum(FatalCasesOnset[[i]]) != sum(OccurredDeaths[[i]]))
+  {stop(paste("sum(FatalCasesOnset[[i]]) != sum(OccurredDeaths[[i]]), i =",i))}
+  
+  if(sum(FatalCasesTested[[i]]) != sum(FatalCasesOnset[[i]]))
+  {stop(paste("sum(FatalCasesTested[[i]]) != sum(FatalCasesOnset[[i]]), i =",i))}
+  
+}
+
+```
+
+# Getting Adjusted and Unadjusted Variant Proportions
+
+```{r}
+
+rm(OnsetDeathLags, OnsetTestingLags, OccurredDeaths, FatalCasesOnset)
+RR.Delta = 2.3
+RR.Alpha = 1.4
+RR.Omicron = 0.5
+RR.Omicron_Lower = 0.15
+RR.Omicron_Higher = 1
+RR.Beta = 1.5
+RR.Gamma = 1.2
+RR.Other = 1
+
+```
+
+```{r, cache=T, message = F}
+
+
+DerivedVariantProportions = read.csv("~/Documents/GitHub/SARS-CoV-2_Genomic_Surveillance/state_variant_share_weekly_weighted.csv") %>% 
+  rbind(
+    read.csv("~/Documents/GitHub/SARS-CoV-2_Genomic_Surveillance/variant_share_weekly_weighted.csv")
+  ) %>%
+  filter(!is.na(Share)) %>%
+  arrange("USA_or_HHSRegion", "WEEK_END") %>% 
+  mutate(WEEK_END = as.Date(WEEK_END),
+         State = state.name[match(USA_or_HHSRegion, state.abb)],
+         State = ifelse(USA_or_HHSRegion=="DC","District of Columbia",State),
+         State = ifelse(USA_or_HHSRegion=="PR","Puerto Rico",State)) %>% 
+  arrange(USA_or_HHSRegion, WEEK_END, Variant)
+
+BootstrappedVariantProportions = list()
+BootstrappedFatalVariantProportions_Base = list()
+BootstrappedFatalVariantProportions_Omicron_Lower = list()
+BootstrappedFatalVariantProportions_Omicron_Higher = list()
+
+Locations = unique(DerivedVariantProportions$USA_or_HHSRegion)
+Variants  = unique(DerivedVariantProportions$Variant)
+
+Variant.RR.Base = rep(RR.Other, length(Variants))
+Variant.RR.Omicron_Lower = rep(RR.Other, length(Variants))
+Variant.RR.Omicron_Higher = rep(RR.Other, length(Variants))
+
+Variant.RR.Base[which(Variants == "B.1.617.2")] = RR.Delta
+Variant.RR.Omicron_Lower[which(Variants == "B.1.617.2")] = RR.Delta
+Variant.RR.Omicron_Higher[which(Variants == "B.1.617.2")] = RR.Delta
+
+Variant.RR.Base[which(Variants == "B.1.1.7")] = RR.Alpha
+Variant.RR.Omicron_Lower[which(Variants == "B.1.1.7")] = RR.Alpha
+Variant.RR.Omicron_Higher[which(Variants == "B.1.1.7")] = RR.Alpha
+
+Variant.RR.Base[which(Variants == "B.1.1.529")] = RR.Omicron
+Variant.RR.Omicron_Lower[which(Variants == "B.1.1.529")] = RR.Omicron_Lower
+Variant.RR.Omicron_Higher[which(Variants == "B.1.1.529")] = RR.Omicron_Higher
+
+Variant.RR.Base[which(Variants == "B.1.351")] = RR.Beta
+Variant.RR.Omicron_Lower[which(Variants == "B.1.351")] = RR.Beta
+Variant.RR.Omicron_Higher[which(Variants == "B.1.351")] = RR.Beta
+
+Variant.RR.Base[which(Variants == "P.1")] = RR.Gamma
+Variant.RR.Omicron_Lower[which(Variants == "P.1")] = RR.Gamma
+Variant.RR.Omicron_Higher[which(Variants == "P.1")] = RR.Gamma
+
+for(i in Locations)
+  {
+  LocationData = 
+    filter(DerivedVariantProportions, 
+           USA_or_HHSRegion == i)
+  
+  LocationName = ifelse(is.na(LocationData$State[1]),i,LocationData$State[1])
+  
+  BootstrappedVariantProportions[[LocationName]] = list()
+  BootstrappedFatalVariantProportions_Base[[LocationName]] = list()
+  BootstrappedFatalVariantProportions_Omicron_Lower[[LocationName]] = list()
+  BootstrappedFatalVariantProportions_Omicron_Higher[[LocationName]] = list()
+
+  
+  Weeks = as.character(unique(LocationData$WEEK_END))
+  
+  for(j in Weeks)
+    {
+    
+    week.name = j#as.character(as.Date("1970-01-01")+j)
+    LocationWeekData = filter(LocationData, WEEK_END == j)
+
+    if(sum(LocationWeekData$count) > 0 & nrow(LocationWeekData) == length(Variants))
+      {
+        LocationWeekData = LocationWeekData[which(LocationWeekData$Variant==Variants),]
+            
+        prob = 
+        data.frame(replicate =
+                   rep(1:Iterations,rep(LocationWeekData$denom_count[1],Iterations)),
+                   sample =
+                     sample(x=1:length(Variants),
+                            LocationWeekData$denom_count[1]*Iterations,
+                            replace = T,
+                            prob = LocationWeekData %>% select(Share) %>% unlist())) %>%
+          group_by(replicate) %>% 
+          summarize(samples = 
+                      tabulate(sample,
+                               nbins =
+                                length(Variants)),
+                    n=n()
+                      #LocationWeekData$denom_count[1]
+                    ) %>% 
+          ungroup() %>%
+          mutate(prob = samples/n) %>%
+          select(prob) %>% 
+          unlist()
+        
+        if(length(prob) != length(Variants)*Iterations)
+        {stop(paste("length(prob) != length(Variants)*Iterations, WEEK_END =",j,", Location =",i))}
+        
+        BootstrappedVariantProportions[[LocationName]][[week.name]] = 
+          matrix(prob,
+                 nrow=length(Variants),
+                 ncol = Iterations,
+                 byrow = F)
+        
+        
+  BootstrappedFatalVariantProportions_Base[[LocationName]][[week.name]] = 
+    t(t(BootstrappedVariantProportions[[LocationName]][[week.name]]*Variant.RR.Base)/colSums(BootstrappedVariantProportions[[LocationName]][[week.name]]*Variant.RR.Base))
+          
+          
+  BootstrappedFatalVariantProportions_Omicron_Lower[[LocationName]][[week.name]] =
+    t(t(BootstrappedVariantProportions[[LocationName]][[week.name]]*Variant.RR.Omicron_Lower)/colSums(BootstrappedVariantProportions[[LocationName]][[week.name]]*Variant.RR.Omicron_Lower))
+  
+  
+  BootstrappedFatalVariantProportions_Omicron_Higher[[LocationName]][[week.name]] =
+    t(t(BootstrappedVariantProportions[[LocationName]][[week.name]]*Variant.RR.Omicron_Higher)/colSums(BootstrappedVariantProportions[[LocationName]][[week.name]]*Variant.RR.Omicron_Higher))
+        
+      }
+    }
+  
+  }
+  
+```
+
+```{r}
+VariantProps = read.csv("~/Downloads/RegionsDashboard (3).csv") %>% 
+  mutate(Day.of.Week.Ending = as.Date(Day.of.Week.Ending, format = "%B %d, %Y")) %>%
+  arrange(desc(Day.of.Week.Ending))
+
+#Omicron.vs.Delta.Death.HR = 0.31 #https://www.thelancet.com/journals/lancet/article/PIIS0140-6736(22)00462-7/fulltext
+
+VariantProps_Grouped = 
+  VariantProps %>% 
+  mutate(Variant = ifelse(Variant == "BA.1.1","B.1.1.529",Variant),
+         Variant = ifelse(Variant == "BA.2","B.1.1.529",Variant),
+         Variant = ifelse(Variant == "BA.2.12.1","B.1.1.529",Variant)) %>% 
+  group_by(Day.of.Week.Ending,Usa.Or.Hhsregion,Variant) %>%
+  summarize(Share = sum(Share)) %>%
+  ungroup()
+
+Census_pop_dat = read_excel("~/Downloads/NST-EST2021-POP.xlsx",     skip = 1)
+
+
+HHS.Regions = 
+  StateDeathData %>%
+  select(State, State_Code) %>% 
+  unique() %>% 
+  mutate(HHS.Region = NA)
+
+rm(StateDeathData)
+
+HHS.Regions$HHS.Region[which(HHS.Regions$State_Code %in% c("CT", "ME", "MA", "NH","RI","VT"))] = 1
+HHS.Regions$HHS.Region[which(HHS.Regions$State_Code %in% c("NJ", "NY","NYC", "PR", "VI"))] = 2
+HHS.Regions$HHS.Region[which(HHS.Regions$State_Code %in% c("DE","DC","PA","MD","VA","WV"))] = 3
+HHS.Regions$HHS.Region[which(HHS.Regions$State_Code %in% c("AL", "FL", "GA", "KY", "MS", "NC", "SC", "TN"))] = 4
+HHS.Regions$HHS.Region[which(HHS.Regions$State_Code %in% c("IL", "IN", "MI", "MN", "OH", "WI"))] = 5
+HHS.Regions$HHS.Region[which(HHS.Regions$State_Code %in% c("AR", "LA", "NM", "OK", "TX"))] = 6
+HHS.Regions$HHS.Region[which(HHS.Regions$State_Code %in% c("IA", "KS","MO","NE"))] = 7
+HHS.Regions$HHS.Region[which(HHS.Regions$State_Code %in% c("CO", "MT", "ND", "SD", "UT", "WY"))] = 8
+HHS.Regions$HHS.Region[which(HHS.Regions$State_Code %in% c("CA", "AZ", "HI", "NV", "AS", "GU", "FSM", "MP", "PW", "RMI"))] = 9
+HHS.Regions$HHS.Region[which(HHS.Regions$State_Code %in% c("AK", "ID", "OR", "WA"))] = 10
+
+StatesByHHSRegion = 
+  data.frame(HHS.Region = 1:10,
+             Jurisdictions =
+               c("Connecticut, Maine, Massachusetts, New Hampshire, Rhode Island, and Vermont",
+                 "New Jersey, New York, and Puerto Rico",
+                 "Delaware, District of Columbia, Maryland, Pennsylvania, Virginia, and West Virginia",
+                 "Alabama, Florida, Georgia, Kentucky, Mississippi, North Carolina, South Carolina, and Tennessee",
+"Illinois, Indiana, Michigan, Minnesota, Ohio, and Wisconsin",
+"Arkansas, Louisiana, New Mexico, Oklahoma, and Texas",
+"Iowa, Kansas, Missouri, and Nebraska",
+"Colorado, Montana, North Dakota, South Dakota, Utah, and Wyoming",
+"Arizona, California, Hawaii, and Nevada",
+"Alaska, Idaho, Oregon, and Washington"))
+
+
+StatesByCensusRegion = 
+  data.frame(CensusRegion = c("Northeast", "South", "Midwest", "West"),
+             Jurisdictions =
+               c("Connecticut, Maine, Massachusetts, New Hampshire, New Jersey, New York, Pennsylvania, Rhode Island, and Vermont",
+                 
+                 "Alabama, Arkansas, Delaware, District of Columbia, Florida, Georgia, Kentucky, Louisiana, Maryland, Mississippi, North Carolina, Oklahoma, South Carolina, Tennessee, Texas, Virginia, and West Virginia",
+                
+              "Illinois, Indiana, Iowa, Kansas, Michigan, Minnesota, Missouri, Nebraska, North Dakota, Ohio, South Dakota, and Wisconsin",
+
+"Alaska, Arizona, California, Colorado, Hawaii, Idaho, Montana, Nevada, New Mexico, Oregon, Utah, Washington, and Wyoming"))
+
+
+HHS.Regions = left_join(HHS.Regions,Census_pop_dat, by = "State")
+
+HHS.Regions$Population[which(HHS.Regions$State_Code=="NYC")] = 8467513
+
+HHS.Regions$Population[which(HHS.Regions$State_Code=="NY")] = 
+  HHS.Regions$Population[which(HHS.Regions$State_Code=="NY")] - 
+  HHS.Regions$Population[which(HHS.Regions$State_Code=="NYC")]
+
+HHS.Regions$Population[which(HHS.Regions$State_Code=="FSM")] = 115021
+
+HHS.Regions$Population[which(HHS.Regions$State_Code=="PW")] = 18092
+
+HHS.Regions$Population[which(HHS.Regions$State_Code=="RMI")] = 59194
+
+HHS.Regions$CensusRegion = NA
+
+HHS.Regions = 
+HHS.Regions %>% 
+  mutate(CensusRegion = 
+           ifelse(HHS.Region %in% c(1,2),"Northeast",NA),
+         CensusRegion = 
+           ifelse(HHS.Region %in% c(3,4,6),"South",CensusRegion),
+         CensusRegion = 
+           ifelse(HHS.Region %in% c(5,7),"Midwest",CensusRegion),
+         CensusRegion = 
+           ifelse(HHS.Region %in% 8:10,"West",CensusRegion),
+         CensusRegion = 
+            ifelse(State ==  "Pennsylvania", "Northeast",CensusRegion),
+         CensusRegion = 
+            ifelse(State ==  "New Mexico","West",CensusRegion),
+         CensusRegion = 
+            ifelse(State ==  "Puerto Rico","South",CensusRegion),
+         CensusRegion = 
+            ifelse(grepl("Dakota",State),"Midwest",CensusRegion))
+
+```
+
+
+# Assigning Deaths to Variants
+
+
+```{r, cache = T, cache.lazy=FALSE}
+
+FatalCasesTested.Location.Variant.Day_Base = list()
+
+FatalCasesTested.Location.Variant.Day_OmicronLower = list()
+
+FatalCasesTested.Location.Variant.Day_OmicronHigher = list()
+
+
+for(i in names(FatalCasesTested))
+  {
+  FatalCasesTestedData = FatalCasesTested[[i]]
+
+  for(j in Variants)
+    {
+
+    
+    FatalCasesTested.Location.Variant.Day_Base[[i]][[j]] =
+      matrix(0, nrow = nrow(FatalCasesTestedData),
+             ncol = ncol(FatalCasesTestedData))
+    
+
+    FatalCasesTested.Location.Variant.Day_OmicronLower[[i]][[j]] = 
+      FatalCasesTested.Location.Variant.Day_Base[[i]][[j]]
+    
+    FatalCasesTested.Location.Variant.Day_OmicronHigher[[i]][[j]] = 
+      FatalCasesTested.Location.Variant.Day_Base[[i]][[j]]
+    }
+
+  for(k in nrow(FatalCasesTestedData):1)
+    {
+    Date = Dates[k]
+    
+    if(any(FatalCasesTestedData[k,]>0))
+      {
+      
+      FatalCasesTestedData_ThisDate = FatalCasesTestedData[k,]
+      
+      if(length(FatalCasesTestedData_ThisDate)==0)
+      {stop("length(FatalCasesTestedData_ThisDate)==0")}
+      
+  # if we have to use the CDC variant proportions
+   if(Date > 
+      max(DerivedVariantProportions$WEEK_END)-14)
+     {
+
+    VarPropDate =
+      filter(VariantProps_Grouped,Day.of.Week.Ending>=Date)$Day.of.Week.Ending %>%
+      min()
+
+    VariantPropsThisDate =
+      filter(VariantProps_Grouped,
+             Day.of.Week.Ending == VarPropDate,
+             Usa.Or.Hhsregion == HHS.Regions$HHS.Region[which(HHS.Regions$State==i)])
+
+
+        DeltaPropThisDate =
+          filter(VariantPropsThisDate, Variant == "B.1.617.2")$Share
+
+    OmicronPropThisDate =
+      sum(filter(VariantPropsThisDate, Variant %in% c("BA.1.1", "B.1.1.529", "BA.2", "BA.2.12.1","BA.1"))$Share)
+
+    if(is.na(OmicronPropThisDate))
+    {stop("is.na(OmicronPropThisDate)")}
+
+    OtherPropThisDate = filter(VariantPropsThisDate, Variant == "Other*")$Share
+
+    if(length(OtherPropThisDate)>1)
+    {stop("length(OtherPropThisDate)>1")}
+
+    if(length(OtherPropThisDate)<1)
+    {stop(paste0("length(OtherPropThisDate)<1, i=",i))}
+
+    OtherShare =
+      BootstrappedVariantProportions[[ifelse(i=="New York City", "New York", i)]][[rev(names(BootstrappedVariantProportions[[ifelse(i=="New York City", "New York", i)]]))[1]]]
+
+    if(is.null(OtherShare))
+    {stop(paste("is.null(OtherShare), location =",i,",Date =",Date))}
+
+    if(nrow(OtherShare) != length(Variants))
+    {stop(paste("nrow(OtherShare) != length(Variants), location =",i,",Date =",Date))}
+
+    if(any(Variants %in% c("B.1.1.529", "B.1.617.2") ))
+    {
+    OtherShare[which(Variants %in% c("B.1.1.529", "B.1.617.2")),] = 0
+    }
+    OtherShare =
+      t(t(OtherShare)/ifelse(colSums(OtherShare)==0,1,colSums(OtherShare)))*OtherPropThisDate
+
+    OtherShare[which(Variants == "B.1.617.2"),] = DeltaPropThisDate
+    OtherShare[which(Variants == "B.1.1.529"),] = OmicronPropThisDate
+
+    VariantPropsThisDate_AllCases = OtherShare
+
+
+  VariantPropsThisDate_Base =
+    t(t(VariantPropsThisDate_AllCases*Variant.RR.Base)/colSums(VariantPropsThisDate_AllCases*Variant.RR.Base))
+
+    VariantPropsThisDate_OmicronLower =
+    t(t(VariantPropsThisDate_AllCases*Variant.RR.Omicron_Lower)/colSums(VariantPropsThisDate_AllCases*Variant.RR.Omicron_Lower))
+
+      VariantPropsThisDate_OmicronHigher =
+    t(t(VariantPropsThisDate_AllCases*Variant.RR.Omicron_Higher)/colSums(VariantPropsThisDate_AllCases*Variant.RR.Omicron_Higher))
+
+
+
+
+
+    #WeightedVariantPropsThisDate = c()
+
+    # VariantPropsThisDate_Base =
+    #   BootstrappedFatalVariantProportions_Base[[i]][[Date]]
+    #
+    # VariantPropsThisDate_OmicronLower =
+    #   BootstrappedFatalVariantProportions_Omicron_Lower[[i]][[Date]]
+    #
+    # VariantPropsThisDate_OmicronHigher =
+    #   BootstrappedFatalVariantProportions_Omicron_Higher[[i]][[Date]]
+    #
+
+    for(j in Variants)
+        {
+        ThisVariantProp_Base =
+          VariantPropsThisDate_Base[which(Variants==j),]
+
+        ThisVariantProp_OmicronLower =
+          VariantPropsThisDate_OmicronLower[which(Variants==j),]
+
+        ThisVariantProp_OmicronHigher =
+          VariantPropsThisDate_OmicronHigher[which(Variants==j),]
+
+        if(length(ThisVariantProp_OmicronHigher)==0)
+        {
+          stop(paste("length(ThisVariantProp_OmicronHigher)==0 for location =",i,", Date =",Date,", Variant =",j))
+        }
+
+
+        FatalCasesTested.Location.Variant.Day_Base[[i]][[j]][k,] =
+          FatalCasesTestedData_ThisDate*ThisVariantProp_Base
+
+        FatalCasesTested.Location.Variant.Day_OmicronLower[[i]][[j]][k,] =
+          FatalCasesTestedData_ThisDate*ThisVariantProp_OmicronLower
+
+
+        FatalCasesTested.Location.Variant.Day_OmicronHigher[[i]][[j]][k,] =
+          FatalCasesTestedData_ThisDate*ThisVariantProp_OmicronHigher
+
+        }
+     }
+  
+  else if(Date >
+          min(DerivedVariantProportions$WEEK_END)-7)# if we can use the derived CDC variant proportions
+  {
+
+        VarPropDate =
+      filter(DerivedVariantProportions,WEEK_END>=Date)$WEEK_END %>%
+      min() %>% as.character()
+
+
+     VariantPropsThisDate_Base =
+       BootstrappedFatalVariantProportions_Base[[ifelse(i=="New York City", "New York",i)]][[VarPropDate]]
+
+     if(is.null(VariantPropsThisDate_Base))
+     {
+       VariantPropsThisDate_Base =
+         BootstrappedFatalVariantProportions_Base[[HHS.Regions$HHS.Region[which(HHS.Regions$State==i)]]][[VarPropDate]]
+     }
+
+     VariantPropsThisDate_OmicronLower =
+       BootstrappedFatalVariantProportions_Omicron_Lower[[ifelse(i=="New York City", "New York",i)]][[VarPropDate]]
+
+  if(is.null(VariantPropsThisDate_OmicronLower))
+     {
+       VariantPropsThisDate_OmicronLower =
+         BootstrappedFatalVariantProportions_Omicron_Lower[[HHS.Regions$HHS.Region[which(HHS.Regions$State==i)]]][[VarPropDate]]
+     }
+
+     VariantPropsThisDate_OmicronHigher =
+       BootstrappedFatalVariantProportions_Omicron_Higher[[ifelse(i=="New York City", "New York",i)]][[VarPropDate]]
+
+  if(is.null(VariantPropsThisDate_OmicronHigher))
+     {
+       VariantPropsThisDate_OmicronHigher =
+         BootstrappedFatalVariantProportions_Omicron_Higher[[HHS.Regions$HHS.Region[which(HHS.Regions$State==i)]]][[VarPropDate]]
+     }
+
+     for(j in Variants)
+        {
+        ThisVariantProp_Base =
+          VariantPropsThisDate_Base[which(Variants==j),]
+
+        if(length(which(Variants==j))==0)
+        {stop("length(which(Variants==j))==0")}
+
+        if(length(ThisVariantProp_Base)==0)
+        {stop(paste("length(ThisVariantProp_Base)==0, Location =",i, "Date =",Date))}
+
+        ThisVariantProp_OmicronLower =
+          VariantPropsThisDate_OmicronLower[which(Variants==j),]
+
+        ThisVariantProp_OmicronHigher =
+          VariantPropsThisDate_OmicronHigher[which(Variants==j),]
+
+        if(length(ThisVariantProp_OmicronHigher)==0)
+        {
+          stop(paste("length(ThisVariantProp_OmicronHigher)==0 for location =",i,", Date =",Date,", Variant =",j))
+        }
+
+      if(length(FatalCasesTestedData_ThisDate)==0)
+        {
+          stop(paste("length(FatalCasesTestedData_ThisDate)==0 for location =",i,", Date =",Date,", Variant =",j))
+                }
+
+        if(length(FatalCasesTestedData_ThisDate*ThisVariantProp_OmicronHigher)==0)
+        {
+          stop(paste("length(FatalCasesTestedData_ThisDate*ThisVariantProp_OmicronHigher)==0 for location =",i,", Date =",Date,", Variant =",j))
+        }
+
+        FatalCasesTested.Location.Variant.Day_Base[[i]][[j]][k,] =
+          FatalCasesTestedData_ThisDate*ThisVariantProp_Base
+
+ 
+        FatalCasesTested.Location.Variant.Day_OmicronLower[[i]][[j]][k,] =
+          FatalCasesTestedData_ThisDate*ThisVariantProp_OmicronLower
+
+
+
+
+        FatalCasesTested.Location.Variant.Day_OmicronHigher[[i]][[j]][k,] =
+          FatalCasesTestedData_ThisDate*ThisVariantProp_OmicronHigher
+
+        }
+  }
+  else # if no variants 
+   {
+     j = which(Variants == "Other")
+        
+        FatalCasesTested.Location.Variant.Day_Base[[i]][[j]][k,] =
+          FatalCasesTestedData_ThisDate
+        
+
+        
+        FatalCasesTested.Location.Variant.Day_OmicronLower[[i]][[j]][k,] =
+          FatalCasesTestedData_ThisDate
+        
+        
+
+        
+        FatalCasesTested.Location.Variant.Day_OmicronHigher[[i]][[j]][k,] =
+          FatalCasesTestedData_ThisDate
+   }
+      }
+    }
+  }
+```
+
+```{r,cache=T,eval = T, cache.lazy=FALSE}
+
+
+
+Variants_Groups = c(Variants, "All Variants", "Other Variants")
+
+
+for(i in names(FatalCasesTested))
+  {
+  
+  for(n in c("All Variants", "Other Variants"))
+  {
+  
+  FatalCasesTested.Location.Variant.Day_Base[[i]][[n]] =
+        matrix(0, nrow = length(Dates),
+             ncol = Iterations)
+  
+  FatalCasesTested.Location.Variant.Day_OmicronLower[[i]][[n]] =
+        matrix(0, nrow = length(Dates),
+             ncol = Iterations)
+  
+  FatalCasesTested.Location.Variant.Day_OmicronHigher[[i]][[n]] =
+        matrix(0, nrow = length(Dates),
+             ncol = Iterations)
+  
+
+  }
+  
+  
+  for(j in Variants)
+    {
+    
+    if(j != "Other")
+    {
+      
+    FatalCasesTested.Location.Variant.Day_Base[[i]][["All Variants"]] =
+      FatalCasesTested.Location.Variant.Day_Base[[i]][["All Variants"]] +
+      FatalCasesTested.Location.Variant.Day_Base[[i]][[j]]
+
+    FatalCasesTested.Location.Variant.Day_OmicronLower[[i]][["All Variants"]] =
+      FatalCasesTested.Location.Variant.Day_OmicronLower[[i]][["All Variants"]] +
+      FatalCasesTested.Location.Variant.Day_OmicronLower[[i]][[j]]
+      
+ 
+    FatalCasesTested.Location.Variant.Day_OmicronHigher[[i]][["All Variants"]] =
+      FatalCasesTested.Location.Variant.Day_OmicronHigher[[i]][["All Variants"]] +
+      FatalCasesTested.Location.Variant.Day_OmicronHigher[[i]][[j]]
+    
+    
+
+  
+    }
+    
+    if(! j %in% c("Other","All Variants","B.1.1.7","B.1.1.529", "B.1.617.2"))
+    {
+          FatalCasesTested.Location.Variant.Day_Base[[i]][["Other Variants"]] =
+      FatalCasesTested.Location.Variant.Day_Base[[i]][["Other Variants"]] +
+      FatalCasesTested.Location.Variant.Day_Base[[i]][[j]]
+
+    FatalCasesTested.Location.Variant.Day_OmicronLower[[i]][["Other Variants"]] =
+      FatalCasesTested.Location.Variant.Day_OmicronLower[[i]][["Other Variants"]] +
+      FatalCasesTested.Location.Variant.Day_OmicronLower[[i]][[j]]
+      
+ 
+    FatalCasesTested.Location.Variant.Day_OmicronHigher[[i]][["Other Variants"]] =
+      FatalCasesTested.Location.Variant.Day_OmicronHigher[[i]][["Other Variants"]] +
+      FatalCasesTested.Location.Variant.Day_OmicronHigher[[i]][[j]]
+    
+    
+    
+
+    }
+      
+
+    }
+  
+  
+  }
+
+
+
+
+
+
+
+
+
+FatalCasesTested.Location.Variant.Day_Base[["National"]] = list()
+FatalCasesTested.Location.Variant.Day_OmicronLower[["National"]] = list()
+FatalCasesTested.Location.Variant.Day_OmicronHigher[["National"]] = list()
+
+
+for(i in unique(StatesByCensusRegion$CensusRegion))
+  {
+  FatalCasesTested.Location.Variant.Day_Base[[i]] = list()
+  FatalCasesTested.Location.Variant.Day_OmicronLower[[i]] = list()
+  FatalCasesTested.Location.Variant.Day_OmicronHigher[[i]] = list()
+  }
+
+for(i in Variants_Groups)
+  {
+
+  for(k in c("National",unique(StatesByCensusRegion$CensusRegion)))
+  {
+ 
+  FatalCasesTested.Location.Variant.Day_Base[[k]][[i]] = 
+        matrix(0, nrow = length(Dates),
+             ncol = Iterations)
+  
+  FatalCasesTested.Location.Variant.Day_OmicronLower[[k]][[i]] = 
+        matrix(0, nrow = length(Dates),
+             ncol = Iterations)
+  
+  FatalCasesTested.Location.Variant.Day_OmicronHigher[[k]][[i]] = 
+        matrix(0, nrow = length(Dates),
+             ncol = Iterations)
+  }
+  
+  for(j in names(FatalCasesTested))
+  {
+   
+   FatalCasesTested.Location.Variant.Day_Base[["National"]][[i]] = 
+    FatalCasesTested.Location.Variant.Day_Base[["National"]][[i]] +
+    FatalCasesTested.Location.Variant.Day_Base[[j]][[i]]
+   
+   FatalCasesTested.Location.Variant.Day_OmicronLower[["National"]][[i]] = 
+    FatalCasesTested.Location.Variant.Day_OmicronLower[["National"]][[i]] +
+    FatalCasesTested.Location.Variant.Day_OmicronLower[[j]][[i]]
+   
+   FatalCasesTested.Location.Variant.Day_OmicronHigher[["National"]][[i]] = 
+    FatalCasesTested.Location.Variant.Day_OmicronHigher[["National"]][[i]] +
+    FatalCasesTested.Location.Variant.Day_OmicronHigher[[j]][[i]]
+   
+   
+   
+   
+  CensusRegion = 
+         HHS.Regions$CensusRegion[which(HHS.Regions$State==j)]
+    
+
+   FatalCasesTested.Location.Variant.Day_Base[[CensusRegion]][[i]] = 
+    FatalCasesTested.Location.Variant.Day_Base[[CensusRegion]][[i]] +
+    FatalCasesTested.Location.Variant.Day_Base[[j]][[i]]
+   
+   FatalCasesTested.Location.Variant.Day_OmicronLower[[CensusRegion]][[i]] = 
+    FatalCasesTested.Location.Variant.Day_OmicronLower[[CensusRegion]][[i]] +
+    FatalCasesTested.Location.Variant.Day_OmicronLower[[j]][[i]]
+      
+   FatalCasesTested.Location.Variant.Day_OmicronHigher[[CensusRegion]][[i]] = 
+    FatalCasesTested.Location.Variant.Day_OmicronHigher[[CensusRegion]][[i]] +
+    FatalCasesTested.Location.Variant.Day_OmicronHigher[[j]][[i]]
+  }
+  
+
+}
+
+
+
+```
+
+```{r, cache = T,eval=T}
+
+
+
+LocationVariantDeaths = data.frame()
+
+for(i in names(FatalCasesTested.Location.Variant.Day_Base))
+{
+
+  for(j in names(FatalCasesTested.Location.Variant.Day_Base[[i]]))
+    {
+
+    if(is.null(FatalCasesTested.Location.Variant.Day_Base[[i]][[j]]))
+    {stop(paste0("is.null(FatalCasesTested.Location.Variant.Day_Base[[",i,"]][[",j,"]])"))}
+
+    if(length(nrow(FatalCasesTested.Location.Variant.Day_Base[[i]][[j]]))==0)
+    {stop(paste0("length(nrow(FatalCasesTested.Location.Variant.Day_Base[[",i,"]][[",j,"]])) == 0"))}
+
+
+    LocationVariantDeaths =
+    rbind(
+      colSums(FatalCasesTested.Location.Variant.Day_Base[[i]][[j]]),
+      colSums(FatalCasesTested.Location.Variant.Day_OmicronLower[[i]][[j]]),
+      colSums(FatalCasesTested.Location.Variant.Day_OmicronHigher[[i]][[j]])
+        ) %>% apply(MARGIN=1,FUN=quantile, probs = c(0.025,0.5,0.975)) %>%
+      t() %>%
+      cbind(Location = rep(i,3),
+            Variant = rep(j,3),
+            Analysis = c("Base", "OmicronLower","OmicronHigher")) %>%
+      rbind(LocationVariantDeaths)
+
+    }
+}
+
+```
+
+```{r}
+
+totalStateDeaths = 
+  totalStateDeaths %>% 
+  left_join(select(HHS.Regions,State,CensusRegion), by = "State")
+
+LocationVariantDeaths = 
+  LocationVariantDeaths %>% 
+  left_join(select(HHS.Regions,State,Population), 
+            by = c("Location" = "State")) %>%
+  mutate(Population = 
+           ifelse(Location == "West",
+                  sum(filter(HHS.Regions,
+                             CensusRegion=="West")$Population),
+                  Population),
+         Population = 
+           ifelse(Location == "South",
+                  sum(filter(HHS.Regions,
+                             CensusRegion=="South")$Population),
+                  Population),
+         Population = 
+           ifelse(Location == "Northeast",
+                  sum(filter(HHS.Regions,
+                             CensusRegion=="Northeast")$Population),
+                  Population),
+         Population = 
+           ifelse(Location == "Midwest",
+                  sum(filter(HHS.Regions,
+                             CensusRegion=="Midwest")$Population),
+                  Population),
+         Population = 
+           ifelse(Location == "National",
+                  sum(HHS.Regions$Population),
+                  #TotalDeaths,
+                  Population)
+         ) %>%
+  rename("Deaths_Median"=`50%`,
+         "Deaths_Lower" =`2.5%`,
+         "Deaths_Upper" = `97.5%`) %>%
+  mutate(Deaths_Median = as.numeric(Deaths_Median),
+         Deaths_Lower = as.numeric(Deaths_Lower),
+         Deaths_Upper = as.numeric(Deaths_Upper)) %>%
+  left_join(select(totalStateDeaths,
+                   State,DeathsTotal, SuppressedDeaths),
+            by = c("Location" = "State")) %>% 
+  mutate(DeathsTotal = ifelse(Location=="National",
+                              TotalDeaths,
+                              DeathsTotal),
+         DeathsTotal = ifelse(Location=="Northeast",
+   sum(filter(totalStateDeaths,CensusRegion=="Northeast")$DeathsTotal),
+                              DeathsTotal),
+   DeathsTotal = ifelse(Location=="South",
+   sum(filter(totalStateDeaths,CensusRegion=="South")$DeathsTotal),
+                              DeathsTotal),
+   DeathsTotal = ifelse(Location=="West",
+   sum(filter(totalStateDeaths,CensusRegion=="West")$DeathsTotal),
+                              DeathsTotal),
+   DeathsTotal = ifelse(Location=="Midwest",
+   sum(filter(totalStateDeaths,CensusRegion=="Midwest")$DeathsTotal),
+                              DeathsTotal),
+         SuppressedDeaths = ifelse(Location=="National",
+                              sum(totalStateDeaths$SuppressedDeaths),
+                              SuppressedDeaths),
+   SuppressedDeaths = ifelse(Location=="West",
+                              sum(filter(totalStateDeaths,CensusRegion=="West")$SuppressedDeaths),
+                              SuppressedDeaths),
+   SuppressedDeaths = ifelse(Location=="Northeast",
+                              sum(filter(totalStateDeaths,CensusRegion=="Northeast")$SuppressedDeaths),
+                              SuppressedDeaths),
+   SuppressedDeaths = ifelse(Location=="Midwest",
+                              sum(filter(totalStateDeaths,CensusRegion=="Midwest")$SuppressedDeaths),
+                              SuppressedDeaths),
+   SuppressedDeaths = ifelse(Location=="South",
+                              sum(filter(totalStateDeaths,CensusRegion=="South")$SuppressedDeaths),
+                              SuppressedDeaths),
+         DeathShare_Median=Deaths_Median/DeathsTotal,
+         DeathShare_Upper=Deaths_Upper/DeathsTotal,
+         DeathShare_Lower=Deaths_Lower/DeathsTotal,
+         DeathsPer100k_Median = 1e5*Deaths_Median/Population,
+         DeathsPer100k_Lower = 1e5*Deaths_Lower/Population,
+         DeathsPer100k_Upper = 1e5*Deaths_Upper/Population,
+         DeathsTotalPer100k = 1e5*DeathsTotal/Population,
+         SuppressedDeathsPer100k = 1e5*SuppressedDeaths/Population,
+         Variant = ifelse(Variant=="Other","NonVariant",Variant),
+         Variant = ifelse(Variant=="B.1.1.7","Alpha",Variant),
+         Variant = ifelse(Variant=="B.1.617.2","Delta",Variant),
+         Variant = ifelse(Variant=="B.1.1.529","Omicron",Variant),
+         Variant = ifelse(Variant=="B.1.351","Beta",Variant),
+         Variant = ifelse(Variant=="P.1","Gamma",Variant),
+         Variant = ifelse(Variant=="B.1.427","Epsilon",Variant),
+         Variant = ifelse(Variant=="B.1.526","Iota",Variant),
+         Variant = ifelse(Variant=="Mu","B.1.621",Variant),
+         Variant = ifelse(Variant=="P.3","Theta",Variant),
+         Variant = ifelse(Variant=="C.37","Lambda",Variant),
+         Analysis = ifelse(Analysis == "OmicronLower",
+                           "Lower Omicron Severity",
+                           Analysis),
+         Analysis = ifelse(Analysis == "OmicronHigher",
+                           "Higher Omicron Severity",
+                           Analysis)
+         )
+
+if(!is.numeric(LocationVariantDeaths$SuppressedDeaths))
+{stop("!is.numeric(LocationVariantDeaths$SuppressedDeaths)")}
+
+if(!is.numeric(LocationVariantDeaths$DeathsTotal))
+{stop("!is.numeric(LocationVariantDeaths$DeathsTotal)")}
+```
+
+# Findings 
+
+### National Deaths
+
+```{r}
+
+LocationVariantDeaths %>%
+  filter(Location == "National",
+         Analysis == "Base",
+         Variant != "Other Variants") %>%
+  mutate(Variant = ifelse(Variant == "NonVariant",
+                          "Non-Variant",
+                          Variant)) %>% 
+  arrange(desc(Deaths_Median)) %>% 
+  select(- Analysis, - Location) %>% 
+  mutate(Deaths = paste0(format(round(Deaths_Median),big.mark=","), " (", format(round(Deaths_Lower),big.mark=","), " - ",  format(round(Deaths_Upper),big.mark=","), ")"  ),
+         
+         DeathsPer100k = 
+           paste0(format(round(DeathsPer100k_Median),big.mark=","), " (", format(round(DeathsPer100k_Lower),big.mark=","), " - ",  format(round(DeathsPer100k_Upper),big.mark=","), ")"  ),
+         
+         DeathShare = 
+         paste0(round(100*Deaths_Median/DeathsTotal), "% (", round(100*Deaths_Lower/DeathsTotal), "% - ",  round(100*Deaths_Upper/DeathsTotal), "%)"  )
+         ) %>% 
+  select(Variant, Deaths, DeathsPer100k,DeathShare) %>% 
+  rbind(c("Unknown (suppressed week)",
+          format(sum(totalStateDeaths$SuppressedDeaths),big.mark=","), 
+          round(1e5*sum(totalStateDeaths$SuppressedDeaths)/sum(HHS.Regions$Population)),
+          paste0(round(100*sum(totalStateDeaths$SuppressedDeaths)/TotalDeaths),"%")),
+        
+        c("Total",
+          format(TotalDeaths,big.mark=","),
+          round(1e5*TotalDeaths/sum(HHS.Regions$Population)),
+          "100%"
+          )
+        ) %>%
+  kable(row.names = NA,
+        col.names = c("Variant", "Deaths",
+                      "Deaths per 100k", "Share of All Deaths"))
+```
+
+### Deaths by Census Region
+
+```{r}
+
+
+LocationVariantDeaths %>%
+  filter(Location %in% c("National","Northeast", "South","Midwest","West"),
+         Variant %in% c("NonVariant","All Variants",
+                        "Other Variants","Alpha","Delta","Omicron")
+         ) %>%
+  pivot_wider(values_from = c(Deaths_Median,Deaths_Lower,Deaths_Upper,
+                              DeathsPer100k_Median, DeathsPer100k_Lower, DeathsPer100k_Upper,
+                              DeathShare_Median, DeathShare_Lower, DeathShare_Upper),
+              names_from = Variant) %>% 
+  mutate(
+          SuppressedDeaths = paste0(format(SuppressedDeaths,big.mark=",")," (",round(100*SuppressedDeaths/DeathsTotal),"%)"),
+         
+          DeathsTotal = format(DeathsTotal, big.mark = ","),
+          
+         NonVariantDeaths =  paste0(format(round(Deaths_Median_NonVariant),big.mark=",")," (",format(round(Deaths_Lower_NonVariant),big.mark=",")," - ",  format(round(Deaths_Upper_NonVariant),big.mark=","),", ", round(100*DeathShare_Median_NonVariant),"%)"),
+         
+         DeltaDeaths = 
+        paste0(format(round(Deaths_Median_Delta),big.mark=",")," (", format(round(Deaths_Lower_Delta),big.mark=",")," - ",  format(round(Deaths_Upper_Delta),big.mark=","),", ",round(100*DeathShare_Median_Delta),"%)"),
+       
+           OmicronDeaths = 
+           paste0(format(round(Deaths_Median_Omicron),big.mark=",")," (", format(round(Deaths_Lower_Omicron),big.mark=",")," - ",  format(round(Deaths_Upper_Omicron),big.mark=","),", ",round(100*DeathShare_Median_Omicron),"%)"),
+         
+   AlphaDeaths = 
+     paste0(format(round(Deaths_Median_Alpha),big.mark=",")," (",          format(round(Deaths_Lower_Alpha),big.mark=",")," - ",  format(round(Deaths_Upper_Alpha),big.mark=","),", ",round(100*DeathShare_Median_Alpha),"%)"),
+         
+         OtherVariantDeaths = 
+           paste0(format(round(`Deaths_Median_Other Variants`),big.mark=",")," (",    format(round(`Deaths_Lower_Other Variants`),big.mark=",")," - ", format(round(`Deaths_Upper_Other Variants`),big.mark=","),", ",round(100*`DeathShare_Median_Other Variants`),"%)"),
+         
+         AllVariantDeaths = 
+           paste0(format(round(`Deaths_Median_All Variants`),big.mark=",")," (",                format(round(`Deaths_Lower_All Variants`),big.mark=",")," - ",                 format(round(`Deaths_Upper_All Variants`),big.mark=","),", ",round(100*`DeathShare_Median_All Variants`),"%)"),
+   
+   Analysis = factor(Analysis, 
+                     levels = c("Base", 
+                                "Lower Omicron Severity", 
+                                "Higher Omicron Severity")
+                     ),
+   
+   Location = factor(Location,
+                     levels = c("National", 
+                                "Northeast", 
+                                "South", 
+                                "Midwest",
+                                "West"
+                                ))
+         ) %>%
+  select(Location,
+         Analysis, 
+         NonVariantDeaths,
+         DeltaDeaths,
+         OmicronDeaths,
+         AlphaDeaths,
+         OtherVariantDeaths,
+         AllVariantDeaths,
+         SuppressedDeaths,
+         DeathsTotal
+         ) %>%
+  arrange(Location, Analysis) %>%
+  kable(row.names = NA,
+        col.names = c("Census Region", "Analysis", "Non-Variant Deaths",
+                      "Delta Deaths", "Omicron Deaths", "Alpha Deaths",
+                      "Other Variant Deaths", "All Variant Deaths",
+                      "Unknown Variant Deaths",
+                      "Total Deaths")
+        )
+```
+
+### Deaths by State
+
+```{r}
+
+
+
+LocationVariantDeaths %>%
+  filter(!Location %in% c("National","Northeast", "South","Midwest","West"),
+         Variant %in% c("NonVariant","All Variants",
+                        "Other Variants","Alpha","Delta","Omicron")
+         ) %>%
+  pivot_wider(values_from = c(Deaths_Median,Deaths_Lower,Deaths_Upper,
+                              DeathsPer100k_Median, DeathsPer100k_Lower, DeathsPer100k_Upper,
+                              DeathShare_Median, DeathShare_Lower, DeathShare_Upper),
+              names_from = Variant) %>% 
+  mutate(
+         SuppressedDeaths = paste0(format(SuppressedDeaths,big.mark=",")," (",round(100*SuppressedDeaths/DeathsTotal),"%)"),
+         
+         DeathsTotal = format(DeathsTotal, big.mark = ","),
+         NonVariantDeaths = 
+           paste0(format(round(Deaths_Median_NonVariant),big.mark=",")," (",
+                  format(round(Deaths_Lower_NonVariant),big.mark=",")," - ", 
+                  format(round(Deaths_Upper_NonVariant),big.mark=","),", ",round(100*DeathShare_Median_NonVariant),"%)"),
+        
+          DeltaDeaths = 
+           paste0(format(round(Deaths_Median_Delta),big.mark=",")," (",
+                  format(round(Deaths_Lower_Delta),big.mark=",")," - ", 
+                  format(round(Deaths_Upper_Delta),big.mark=","),", ",round(100*DeathShare_Median_Delta),"%)"),
+        
+          OmicronDeaths = 
+           paste0(format(round(Deaths_Median_Omicron),big.mark=",")," (",
+                  format(round(Deaths_Lower_Omicron),big.mark=",")," - ", 
+                  format(round(Deaths_Upper_Omicron),big.mark=","),", ",round(100*DeathShare_Median_Omicron),"%)"),
+         
+         AlphaDeaths = 
+           paste0(format(round(Deaths_Median_Alpha),big.mark=",")," (",
+                  format(round(Deaths_Lower_Alpha),big.mark=",")," - ", 
+                  format(round(Deaths_Upper_Alpha),big.mark=","),", ",round(100*DeathShare_Median_Alpha),"%)"),
+         
+         OtherVariantDeaths = 
+           paste0(format(round(`Deaths_Median_Other Variants`),big.mark=",")," (",
+                  format(round(`Deaths_Lower_Other Variants`),big.mark=",")," - ", 
+                  format(round(`Deaths_Upper_Other Variants`),big.mark=","),", ",round(100*`DeathShare_Median_Other Variants`),"%)"),
+         
+         AllVariantDeaths = 
+           paste0(format(round(`Deaths_Median_All Variants`),big.mark=",")," (",
+                  format(round(`Deaths_Lower_All Variants`),big.mark=",")," - ", 
+                  format(round(`Deaths_Upper_All Variants`),big.mark=","),", ",round(100*`DeathShare_Median_All Variants`),"%)") ,
+   
+   Analysis = factor(Analysis, 
+                     levels = c("Base", 
+                                "Lower Omicron Severity", 
+                                "Higher Omicron Severity")
+                     )
+         
+         ) %>%
+  select(Location,
+         Analysis, 
+         NonVariantDeaths,
+         DeltaDeaths,
+         OmicronDeaths,
+         AlphaDeaths,
+         OtherVariantDeaths,
+         AllVariantDeaths,
+         SuppressedDeaths,
+         DeathsTotal
+         ) %>%
+  arrange(Location, Analysis) %>%
+  kable(row.names = NA,
+        col.names = c("Census Region", "Analysis", "Non-Variant Deaths",
+                      "Delta Deaths", "Omicron Deaths", "Alpha Deaths",
+                      "Other Variant Deaths", "All Variant Deaths",
+                      "Unknown Variant Deaths",
+                      "Total Deaths")
+        )
+```
+
+### Deaths per Capita by Census Region
+
+```{r}
+
+
+LocationVariantDeaths %>%
+  filter(Location %in% c("National","Northeast", "South","Midwest","West"),
+         Variant %in% c("NonVariant","All Variants",
+                        "Other Variants","Alpha","Delta","Omicron")
+         ) %>%
+  pivot_wider(values_from = c(Deaths_Median,Deaths_Lower,Deaths_Upper,
+                              DeathsPer100k_Median, DeathsPer100k_Lower, DeathsPer100k_Upper,
+                              DeathShare_Median, DeathShare_Lower, DeathShare_Upper),
+              names_from = Variant) %>% 
+  mutate(
+    DeathsTotalPer100k = format(round(DeathsTotalPer100k), big.mark = ","),
+         
+         SuppressedDeathsPer100k = paste0(format(round(SuppressedDeathsPer100k),big.mark=",")," (",round(100*SuppressedDeaths/DeathsTotal),"%)"),
+         
+         NonVariantDeathsPer100k = 
+           paste0(format(round(DeathsPer100k_Median_NonVariant),big.mark=",")," (",
+                  format(round(DeathsPer100k_Lower_NonVariant),big.mark=",")," - ", 
+                  format(round(DeathsPer100k_Upper_NonVariant),big.mark=","),", ",round(100*DeathShare_Median_NonVariant),"%)"),
+    
+         DeltaDeathsPer100k = 
+           paste0(format(round(DeathsPer100k_Median_Delta),big.mark=",")," (",
+             format(round(DeathsPer100k_Lower_Delta),big.mark=",")," - ", 
+                  format(round(DeathsPer100k_Upper_Delta),big.mark=","),", ",
+                  round(100*DeathShare_Median_Delta),"%)"),
+    
+    
+         OmicronDeathsPer100k = 
+           paste0(format(round(DeathsPer100k_Median_Omicron),big.mark=",")," (",
+                  format(round(DeathsPer100k_Lower_Omicron),big.mark=",")," - ", 
+                  format(round(DeathsPer100k_Upper_Omicron),big.mark=","),", ",round(100*DeathShare_Median_Omicron),"%)"),
+         
+         AlphaDeathsPer100k = 
+           paste0(format(round(DeathsPer100k_Median_Alpha),big.mark=",")," (",
+                  format(round(DeathsPer100k_Lower_Alpha),big.mark=",")," - ", 
+                  format(round(DeathsPer100k_Upper_Alpha),big.mark=","),", ",round(100*DeathShare_Median_Alpha),"%)"),
+         
+         OtherVariantDeathsPer100k = 
+           paste0(format(round(`DeathsPer100k_Median_Other Variants`),big.mark=",")," (",  format(round(`DeathsPer100k_Lower_Other Variants`),big.mark=",")," - ", 
+                  format(round(`DeathsPer100k_Upper_Other Variants`),big.mark=","),", ",round(100*`DeathShare_Median_Other Variants`),"%)"),
+         
+         AllVariantDeathsPer100k = 
+           paste0(format(round(`DeathsPer100k_Median_All Variants`),big.mark=",")," (",
+                  format(round(`DeathsPer100k_Lower_All Variants`),big.mark=",")," - ", 
+                  format(round(`DeathsPer100k_Upper_All Variants`),big.mark=","),", ",round(100*`DeathShare_Median_All Variants`),"%)"),
+   
+   Analysis = factor(Analysis, 
+                     levels = c("Base", 
+                                "Lower Omicron Severity", 
+                                "Higher Omicron Severity")
+                     ),
+   
+   Location = factor(Location,
+                     levels = c("National", 
+                                "Northeast", 
+                                "South", 
+                                "Midwest",
+                                "West"
+                                ))
+         
+         ) %>%
+  select(Location,
+         Analysis, 
+         NonVariantDeathsPer100k,
+         DeltaDeathsPer100k,
+         OmicronDeathsPer100k,
+         AlphaDeathsPer100k,
+         OtherVariantDeathsPer100k,
+         AllVariantDeathsPer100k,
+         SuppressedDeathsPer100k,
+         DeathsTotalPer100k
+         ) %>%
+  arrange(Location, Analysis) %>%
+  kable(row.names = NA,
+        col.names = c("Census Region", "Analysis", "Non-Variant Deaths Per 100k",
+                      "Delta Deaths Per 100k", "Omicron Deaths Per 100k", "Alpha Deaths Per 100k",
+                      "Other Variant Deaths Per 100k", "All Variant Deaths Per 100k",
+                      "Unknown Variant Deaths Per 100k",
+                      "Total Deaths Per 100k"),
+        digits = 0
+        )
+```
+
+### Deaths per Capita by State
+
+```{r}
+
+LocationVariantDeaths %>%
+  filter(!Location %in% c("National","Northeast", "South","Midwest","West"),
+         Variant %in% c("NonVariant","All Variants",
+                        "Other Variants","Alpha","Delta","Omicron")
+         ) %>%
+  pivot_wider(values_from = c(Deaths_Median,Deaths_Lower,Deaths_Upper,
+                              DeathsPer100k_Median, DeathsPer100k_Lower, DeathsPer100k_Upper,
+                              DeathShare_Median, DeathShare_Lower, DeathShare_Upper),
+              names_from = Variant) %>% 
+  mutate(
+    DeathsTotalPer100k = format(round(DeathsTotalPer100k), big.mark = ","),
+         
+         SuppressedDeathsPer100k = paste0(format(round(SuppressedDeathsPer100k),big.mark=",")," (",round(100*SuppressedDeaths/DeathsTotal),"%)"),
+         
+         NonVariantDeathsPer100k = 
+           paste0(format(round(DeathsPer100k_Median_NonVariant),big.mark=",")," (",
+                  format(round(DeathsPer100k_Lower_NonVariant),big.mark=",")," - ", 
+                  format(round(DeathsPer100k_Upper_NonVariant),big.mark=","),", ",round(100*DeathShare_Median_NonVariant),"%)"),
+    
+         DeltaDeathsPer100k = 
+           paste0(format(round(DeathsPer100k_Median_Delta),big.mark=",")," (",
+             format(round(DeathsPer100k_Lower_Delta),big.mark=",")," - ", 
+                  format(round(DeathsPer100k_Upper_Delta),big.mark=","),", ",
+                  round(100*DeathShare_Median_Delta),"%)"),
+    
+    
+         OmicronDeathsPer100k = 
+           paste0(format(round(DeathsPer100k_Median_Omicron),big.mark=",")," (",
+                  format(round(DeathsPer100k_Lower_Omicron),big.mark=",")," - ", 
+                  format(round(DeathsPer100k_Upper_Omicron),big.mark=","),", ",round(100*DeathShare_Median_Omicron),"%)"),
+         
+         AlphaDeathsPer100k = 
+           paste0(format(round(DeathsPer100k_Median_Alpha),big.mark=",")," (",
+                  format(round(DeathsPer100k_Lower_Alpha),big.mark=",")," - ", 
+                  format(round(DeathsPer100k_Upper_Alpha),big.mark=","),", ",round(100*DeathShare_Median_Alpha),"%)"),
+         
+         OtherVariantDeathsPer100k = 
+           paste0(format(round(`DeathsPer100k_Median_Other Variants`),big.mark=",")," (",  format(round(`DeathsPer100k_Lower_Other Variants`),big.mark=",")," - ", 
+                  format(round(`DeathsPer100k_Upper_Other Variants`),big.mark=","),", ",round(100*`DeathShare_Median_Other Variants`),"%)"),
+         
+         AllVariantDeathsPer100k = 
+           paste0(format(round(`DeathsPer100k_Median_All Variants`),big.mark=",")," (",
+                  format(round(`DeathsPer100k_Lower_All Variants`),big.mark=",")," - ", 
+                  format(round(`DeathsPer100k_Upper_All Variants`),big.mark=","),", ",round(100*`DeathShare_Median_All Variants`),"%)") ,
+   
+   Analysis = factor(Analysis, 
+                     levels = c("Base", 
+                                "Lower Omicron Severity", 
+                                "Higher Omicron Severity")
+                     )
+         
+         ) %>%
+  select(Location,
+         Analysis, 
+         NonVariantDeathsPer100k,
+         DeltaDeathsPer100k,
+         OmicronDeathsPer100k,
+         AlphaDeathsPer100k,
+         OtherVariantDeathsPer100k,
+         AllVariantDeathsPer100k,
+         SuppressedDeathsPer100k,
+         DeathsTotalPer100k
+         ) %>%
+  arrange(Location, Analysis) %>%
+  kable(row.names = NA,
+        col.names = c("Census Region", "Analysis", "Non-Variant Deaths Per 100k",
+                      "Delta Deaths Per 100k", "Omicron Deaths Per 100k", "Alpha Deaths Per 100k",
+                      "Other Variant Deaths Per 100k", "All Variant Deaths Per 100k",
+                      "Unknown Variant Deaths Per 100k",
+                      "Total Deaths Per 100k"),
+        digits = 0
+        )
+```
+
+### Plots
+
+```{r, fig.height=9, fig.width=8}
+
+
+TotalPlot = 
+LocationVariantDeaths %>% 
+  filter(Analysis == "Base",
+         Location %in% c("National","Northeast", "South","Midwest","West"),
+         Variant == "NonVariant"
+         ) %>% 
+  mutate(Location = factor(Location,
+                     levels = c("National", 
+                                "Northeast", 
+                                "South", 
+                                "Midwest",
+                                "West"
+                                ))) %>%
+  arrange(Location) %>%
+  ggplot(aes(x = Location, y = DeathsTotalPer100k)) +
+  geom_col(
+    fill = c("darkgreen","#85755c", "#a5496a",
+                       "#393d6e", "#ca4848"
+             )
+           ) +
+   labs(x = "Census Region", 
+        y = "Median Estimated Deaths/100k") +
+  theme(panel.grid = element_blank(),
+        panel.background = element_blank(),
+        axis.text.x = element_text(angle = 40,hjust=0.75),
+        axis.title.y = element_text(hjust = 0)
+        ) + 
+  ylim(0,340)
+
+
+
+AncestralPlot = 
+LocationVariantDeaths %>% 
+  filter(Analysis == "Base",
+         Location %in% c("National","Northeast", "South","Midwest","West"),
+         Variant == "NonVariant"
+         ) %>% 
+  mutate(Location = factor(Location,
+                     levels = c("National", 
+                                "Northeast", 
+                                "South", 
+                                "Midwest",
+                                "West"
+                                ))) %>%
+  arrange(Location) %>%
+  ggplot(aes(x = Location, y = DeathsPer100k_Median)) +
+  geom_col(
+    fill = c("darkgreen","#85755c", "#a5496a",
+                       "#393d6e", "#ca4848"#,
+             )
+           ) +
+   labs(x = "Census Region", 
+        y = "Median Estimated Deaths/100k") +
+  theme(panel.grid = element_blank(),
+        panel.background = element_blank(),
+        axis.text.x = element_text(angle = 40,hjust=0.75),
+        axis.title.y = element_text(hjust = 0)
+        ) + 
+  ylim(0,220)
+
+
+AllVariantsPlot = 
+LocationVariantDeaths %>% 
+  filter(Analysis == "Base",
+         Location %in% c("National","Northeast", "South","Midwest","West"),
+         Variant == "All Variants"
+         ) %>% 
+  mutate(Location = factor(Location,
+                     levels = c("National", 
+                                "Northeast", 
+                                "South", 
+                                "Midwest",
+                                "West"
+                                ))) %>%
+  arrange(Location) %>%
+  ggplot(aes(x = Location, y = DeathsPer100k_Median)) +
+  geom_col(
+    fill = c("darkgreen","#85755c", "#a5496a",
+                       "#393d6e", "#ca4848"#,
+             )
+           ) +
+   labs(x = "Census Region", 
+        y = "Median Estimated Deaths/100k") +
+  theme(panel.grid = element_blank(),
+        panel.background = element_blank(),
+        axis.text.x = element_text(angle = 40,hjust=0.75),
+        axis.title.y = element_text(hjust = 0)
+        ) + 
+  ylim(0,160)
+
+AlphaPlot = 
+LocationVariantDeaths %>% 
+  filter(Analysis == "Base",
+         Location %in% c("National","Northeast", "South","Midwest","West"),
+         Variant == "Alpha"
+         ) %>% 
+  mutate(Location = factor(Location,
+                     levels = c("National", 
+                                "Northeast", 
+                                "South", 
+                                "Midwest",
+                                "West"
+                                ))) %>%
+  arrange(Location) %>%
+  ggplot(aes(x = Location, y = DeathsPer100k_Median)) +
+  geom_col(
+    fill = c("darkgreen","#85755c", "#a5496a",
+                       "#393d6e", "#ca4848"#,
+             )
+           ) +
+   labs(x = "Census Region", 
+        y = "Median Estimated Deaths/100k") +
+  theme(panel.grid = element_blank(),
+        panel.background = element_blank(),
+        axis.text.x = element_text(angle = 40,hjust=0.75),
+        axis.title.y = element_text(hjust = 0)
+        ) + 
+  ylim(0,16) 
+
+DeltaPlot = 
+LocationVariantDeaths %>% 
+  filter(Analysis == "Base",
+         Location %in% c("National","Northeast", "South","Midwest","West"),
+         Variant == "Delta"
+         ) %>% 
+  mutate(Location = factor(Location,
+                     levels = c("National", 
+                                "Northeast", 
+                                "South", 
+                                "Midwest",
+                                "West"
+                                ))) %>%
+  arrange(Location) %>%
+  ggplot(aes(x = Location, y = DeathsPer100k_Median)) +
+  geom_col(
+    fill = c("darkgreen","#85755c", "#a5496a",
+                       "#393d6e", "#ca4848"#,
+             )
+           ) +
+   labs(x = "Census Region", 
+        y = "Median Estimated Deaths/100k") +
+  theme(panel.grid = element_blank(),
+        panel.background = element_blank(),
+        axis.text.x = element_text(angle = 40,hjust=0.75),
+        axis.title.y = element_text(hjust = 0)
+        ) + 
+  ylim(0,105)
+
+OmicronPlot =
+LocationVariantDeaths %>%
+  filter(Analysis == "Base",
+         Location %in% c("National","Northeast", "South","Midwest","West"),
+         Variant == "Omicron"
+         ) %>%
+  mutate(Location = factor(Location,
+                     levels = c("National",
+                                "Northeast",
+                                "South",
+                                "Midwest",
+                                "West"
+                                ))) %>%
+  arrange(Location) %>%
+  ggplot(aes(x = Location, y = DeathsPer100k_Median)) +
+  geom_col(
+    fill = c("darkgreen" ,"#85755c", "#a5496a",
+                       "#393d6e", "#ca4848"
+             )
+           ) +
+   labs(x = "Census Region",
+        y = "Median Estimated Deaths/100k") +
+  theme(panel.grid = element_blank(),
+        panel.background = element_blank(),
+        axis.text.x = element_text(angle = 40,hjust=0.75),
+        axis.title.y = element_text(hjust = 0)
+        ) +
+  ylim(0,45)
+
+
+
+OtherVariantsPlot =
+LocationVariantDeaths %>%
+  filter(Analysis == "Base",
+         Location %in% c("National","Northeast", "South","Midwest","West"),
+         Variant == "Other Variants"
+         ) %>%
+  mutate(Location = factor(Location,
+                     levels = c("National",
+                                "Northeast",
+                                "South",
+                                "Midwest",
+                                "West"
+                                ))) %>%
+  arrange(Location) %>%
+  ggplot(aes(x = Location, y = DeathsPer100k_Median)) +
+  geom_col(
+    fill = c("darkgreen","#85755c", "#a5496a",
+                       "#393d6e", "#ca4848"#,
+             )
+           ) +
+   labs(x = "Census Region",
+        y = "Median Estimated Deaths/100k") +
+  theme(panel.grid = element_blank(),
+        panel.background = element_blank(),
+        axis.text.x = element_text(angle = 40,hjust=0.75),
+        axis.title.y = element_text(hjust =0)
+        )
+
+
+
+VariantSharePlot =
+LocationVariantDeaths %>%
+  filter(Analysis == "Base",
+         Location %in% c("National","Northeast", "South","Midwest","West"),
+         Variant == "All Variants"
+         ) %>%
+  mutate(Location = factor(Location,
+                     levels = c("National",
+                                "Northeast",
+                                "South",
+                                "Midwest",
+                                "West"
+                                ))) %>%
+  arrange(Location) %>%
+  ggplot(aes(x = Location, y = 100*DeathShare_Median)) +
+  geom_col(
+    fill = c("darkgreen","#85755c", "#a5496a",
+                       "#393d6e", "#ca4848"#,
+             )
+           ) +
+   labs(x = "Census Region",
+        y = "Median Estimated % of Deaths\nCaused by Variants") +
+  theme(panel.grid = element_blank(),
+        panel.background = element_blank(),
+        axis.text.x = element_text(angle = 40,hjust=0.75),
+        axis.title.y = element_text(hjust = 0)
+        ) +
+  scale_y_continuous(breaks = c(0,10,20,30,40,50)) + 
+  ylim(0,60)
+
+UnknownSharePlot =
+LocationVariantDeaths %>%
+  filter(Analysis == "Base",
+         Location %in% c("National","Northeast", "South","Midwest","West"),
+         Variant == "All Variants"
+         ) %>%
+  mutate(Location = factor(Location,
+                     levels = c("National",
+                                "Northeast",
+                                "South",
+                                "Midwest",
+                                "West"
+                                )),
+         SuppressedDeathShare = 100*SuppressedDeaths/DeathsTotal) %>%
+  arrange(Location) %>%
+  ggplot(aes(x = Location, y = DeathShare_Median)) +
+  geom_col(
+    fill = c("darkgreen","#85755c", "#a5496a",
+                       "#393d6e", "#ca4848"#,
+             )
+           ) +
+   labs(x = "Census Region",
+        y = "% of Deaths in Suppressed Weeks") +
+  theme(panel.grid = element_blank(),
+        panel.background = element_blank(),
+        axis.text.x = element_text(angle = 40,hjust=0.75),
+        axis.title.y = element_text(size = 10,hjust = 0)
+        ) +
+  ylim(0,0.55) +
+  scale_y_continuous(breaks = c(0,0.15,0.3,0.45))
+
+
+# TotalPlot
+# AncestralPlot
+# AllVariantsPlot
+# AlphaPlot
+# DeltaPlot
+# OmicronPlot
+# OtherVariantsPlot
+# VariantSharePlot
+# UnknownSharePlot
+
+ggarrange(TotalPlot, AncestralPlot, AllVariantsPlot,
+          AlphaPlot, DeltaPlot, OmicronPlot,
+          OtherVariantsPlot, VariantSharePlot, UnknownSharePlot,
+          labels = c("A: All COVID-19 Deaths",
+                     "B: Wild-Type",
+                     "C: All Variants",
+
+                     "D: Alpha",
+                     "E: Delta",
+                     "F: Omicron",
+
+                     "G: Other",
+                     "H: Variant Share",
+                     "I: Unknown Share"),
+          vjust = c(rep(1.1,3),rep(1,6)),
+          hjust = c(-0.1-0.05,rep(-0.1-0.2,8)),
+          ncol = 3, nrow = 3)
+
+```
+
+```{r}
+LocationVariantDeaths %>%
+  filter(Analysis == "Base",
+         Location %in% c("National","Northeast", "South","Midwest","West"),
+         Variant %in% c("NonVariant","Alpha","Delta","Omicron",
+                        "Other Variants")
+         ) %>%
+  mutate(Location = factor(Location,
+                     levels = c("National",
+                                "Northeast",
+                                "South",
+                                "Midwest",
+                                "West"
+                                )),
+          Variant = factor(Variant, levels = rev(c("NonVariant","Alpha","Delta","Omicron",
+                        "Other Variants")))) %>%
+  arrange(Location,Variant) %>%
+  ggplot(aes(x = Location, 
+             y = DeathsPer100k_Median, 
+             fill = Variant)) +
+  geom_bar(position="stack", stat = "identity") +
+   labs(x = "Census Region", 
+        y = "Median Estimated Deaths per 100k") + 
+  theme(panel.grid = element_blank(),
+        panel.background = element_blank(),
+        axis.text.x = element_text(angle = 40,hjust=0.75),
+        axis.title.y = element_text(size = 10)
+        )
+```
+
+
